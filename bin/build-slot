@@ -1,0 +1,94 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { constants } from 'node:os';
+import { execFileSync, spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+
+// shortcut: local POSIX hosts only; use a distributed lock for multi-host builds.
+async function main() {
+  const args = process.argv.slice(2);
+  const status = args.length === 1 && args[0] === 'status';
+  if (!status && (args.length < 3 || args[1] !== '--' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(args[0]))) throw new Error('Usage: build-slot status | build-slot <slug> -- <command> [args...]');
+  if (!status && process.env.RELAY_SLOT_HELD) throw new Error('Nested build slots are forbidden. Run the inner command directly.');
+  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { encoding: 'utf8' }).trim();
+  const dir = path.resolve(process.env.RELAY_SLOT_DIR || path.join(common, 'relay-build-slots'));
+  fs.mkdirSync(dir, { recursive: true });
+  const limitFile = path.join(dir, 'limit');
+  const requested = process.env.RELAY_BUILD_SLOTS;
+  const limit = Number(requested || (fs.existsSync(limitFile) ? fs.readFileSync(limitFile, 'utf8') : 2));
+  if (!Number.isInteger(limit) || limit < 1 || limit > 32) throw new Error('RELAY_BUILD_SLOTS must be an integer from 1 to 32.');
+  try { fs.writeFileSync(limitFile, `${limit}\n`, { flag: 'wx' }); }
+  catch (e) { if (e.code !== 'EEXIST') throw e; }
+  if (Number(fs.readFileSync(limitFile, 'utf8')) !== limit) throw new Error('Slot limit mismatch. Ops must drain all jobs before changing the shared limit.');
+  if (status) {
+    for (let i = 1; i <= limit; i++) {
+      const slot = path.join(dir, `slot-${i}`);
+      let label = 'free';
+      if (fs.existsSync(slot)) {
+        try { label = fs.readFileSync(path.join(slot, 'owner.json'), 'utf8').trim(); }
+        catch { label = 'held: incomplete receipt; Ops inspection required'; }
+      }
+      console.log(`slot-${i}: ${label}`);
+    }
+    return;
+  }
+  const data = process.env.RELAY_TEST_DATA;
+  if (!data || !path.isAbsolute(data) || path.resolve(data) === path.parse(data).root) throw new Error('Set RELAY_TEST_DATA to a dedicated absolute task data directory.');
+  fs.mkdirSync(data, { recursive: true });
+  let slot, child, stopping = 0, escalation;
+  const groupAlive = () => {
+    if (!child?.pid) return false;
+    try { process.kill(-child.pid, 0); return true; }
+    catch (e) { if (e.code === 'ESRCH') return false; throw e; }
+  };
+  const signalGroup = signal => {
+    if (!child?.pid) return;
+    try { process.kill(-child.pid, signal); }
+    catch (e) { if (e.code !== 'ESRCH') throw e; }
+  };
+  const stop = signal => {
+    stopping ||= { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[signal];
+    signalGroup('SIGTERM');
+    escalation ||= setTimeout(() => signalGroup('SIGKILL'), 3000);
+  };
+  const handlers = new Map(['SIGINT', 'SIGTERM', 'SIGHUP'].map(sig => [sig, () => stop(sig)]));
+  for (const [sig, handler] of handlers) process.on(sig, handler);
+  try {
+    while (!slot && !stopping) {
+      for (let i = 1; i <= limit; i++) {
+        const candidate = path.join(dir, `slot-${i}`);
+        try { fs.mkdirSync(candidate); slot = candidate; break; }
+        catch (e) { if (e.code !== 'EEXIST') throw e; }
+      }
+      if (!slot) await delay(100);
+    }
+    if (stopping) { process.exitCode = stopping; return; }
+    const receipt = { slug: args[0], pid: process.pid, group: null, since: new Date().toISOString() };
+    const owner = path.join(slot, 'owner.json');
+    fs.writeFileSync(owner, JSON.stringify(receipt));
+    child = spawn(args[2], args.slice(3), { detached: true, stdio: 'inherit', env: { ...process.env, RELAY_SLOT_HELD: '1' } });
+    // A crash between launch and receipt leaves the slot held for manual reconciliation.
+    receipt.group = child.pid ?? null;
+    fs.writeFileSync(owner, JSON.stringify(receipt));
+    const result = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => resolve(code ?? (128 + (constants.signals[signal] || 0))));
+    });
+    // Stop descendants that outlived their foreground parent before releasing the slot.
+    if (groupAlive()) {
+      signalGroup('SIGTERM');
+      for (let i = 0; i < 30 && groupAlive(); i++) await delay(100);
+      if (groupAlive()) signalGroup('SIGKILL');
+      for (let i = 0; i < 30 && groupAlive(); i++) await delay(100);
+      if (groupAlive()) throw new Error('Process group still exists; slot retained for Ops inspection.');
+    }
+    process.exitCode = stopping || result;
+  } finally {
+    clearTimeout(escalation);
+    for (const [sig, handler] of handlers) process.off(sig, handler);
+    // Never release uncertain process ownership, including an unkillable descendant.
+    if (slot && !groupAlive()) fs.rmSync(slot, { recursive: true });
+  }
+}
+main().catch(e => { console.error(`build-slot: ${e.message}`); process.exitCode = 1; });

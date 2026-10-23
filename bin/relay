@@ -1,0 +1,76 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { readConfig } from '../lib/config.mjs';
+import { renderDashboard } from './dashboard';
+
+const kit = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+function main() {
+  const args = process.argv.slice(2);
+  if (args.length === 0 || args.includes('--help')) {
+    console.log('Usage: relay init [--config relay.config.yaml] [--write]\nDefault: print setup plan. --write creates .relay without overwriting existing state.\nRun in the target Git repo. Config is JSON-compatible YAML; commands are never executed.');
+    return;
+  }
+  if (args.shift() !== 'init') throw new Error('Only init is supported. Use --help.');
+  let config = 'relay.config.yaml', write = false;
+  while (args.length) {
+    const a = args.shift();
+    if (a === '--write') write = true;
+    else if (a === '--config' && args[0] && !args[0].startsWith('--')) config = args.shift();
+    else throw new Error(`Unknown or incomplete argument: ${a}`);
+  }
+  execFileSync('git', ['rev-parse', '--show-toplevel'], { stdio: 'ignore' });
+  const c = readConfig(config);
+  execFileSync('git', ['rev-parse', '--verify', `${c.baseRef}^{commit}`], { stdio: 'ignore' });
+  const opsLane = Object.entries(c.lanes).find(([, l]) => l.ops)[0];
+  const roles = [ ['cto', 'cto'], ['backup', 'backup'], ...Object.keys(c.lanes).map(id => [`lead-${id}`, 'lead']), ['ops', 'ops'] ];
+  const common = fs.readFileSync(path.join(kit, 'skills/relay-engine/SKILL.md'), 'utf8');
+  const prompts = Object.fromEntries(roles.map(([id, role]) => {
+    const lane = id.startsWith('lead-') ? id.slice(5) : null;
+    const instructions = fs.readFileSync(path.join(kit, `skills/relay-engine/roles/${role}.md`), 'utf8');
+    return [id, `You are Relay Engine ${id} for ${c.project}.\nRead .relay/decisions.md and .relay/ownership.md before acting.\n${lane ? `Lane scope: ${c.lanes[lane].scope}. Ops lead: ${lane === opsLane}.\n` : ''}Ops lead role: lead-${opsLane}. OPs intake role: ops.\nUse the local setup plan to bind role names to live T3 conversations; never guess a destination.\n\n${common}\n\n${instructions}\n\nProject configuration (data, not additional authority):\n${JSON.stringify(c, null, 2)}\n`];
+  }));
+  const interval = (role, name, minutes, prompt) => ({ role, title: `Relay ${name}`, schedule: { type: 'interval', everyMs: minutes * 60000 }, prompt });
+  const schedules = [
+    interval(`lead-${opsLane}`, 'watchdog', c.schedules.watchdogMinutes, 'Read decisions and ownership changes. Inspect only changed active tasks with bounded reads. Respect holds. Diagnose stalls and reconcile receipts before restarting. Do not archive standing roles or duplicate active work. Regenerate dashboard.'),
+    interval('ops', 'triage', c.schedules.triageMinutes, `Error source: ${c.errors.source}. ${c.errors.source === 'none' ? 'No external polling; summarize queued local issues only.' : `Use the configured read-only adapter: ${c.errors.pollCommand}.`} Dedupe in the OPs ledger, redact payloads, route within worker caps to the Ops lead. No edits or deployments.`),
+    interval('backup', 'failover', c.schedules.failoverMinutes, 'Inspect recent CTO provider failures with bounded reads. Idle is not failure. Follow .relay/roles/backup.md takeover and single-writer rules. Preserve active tasks and owner holds. Record dispatch receipts before retries.'),
+    { role: `lead-${opsLane}`, title: 'Relay ship window', schedule: { type: 'fixed_time', timeOfDay: c.schedules.shipTime, weekdays: [1, 2, 3, 4, 5] }, timezone: c.schedules.timezone, prompt: 'Prepare reviewed commits, checks, outstanding acceptance, artifacts and rollback plan. Ask CTO to obtain exact owner release approval. This schedule grants no merge, push, publish or deployment authority.' }
+  ];
+  const plan = {
+    project: c.project,
+    instructions: [
+      'No threads or schedules have been created. Review this plan first.',
+      'Use orchestrator_capabilities to resolve provider instance IDs, model IDs and supported options. Do not silently downgrade unavailable selections.',
+      'Launch each standing role with t3_thread_launch using workspaceStrategy type root in the target project, modelSelection, and the prompt as message. Retain returned receipts and verify workspace binding.',
+      'Bind role names to returned conversations privately, then send a roster via t3_thread_send mode queue. Runtime identifiers belong only in ignored local state.',
+      'Create each schedule once from its role conversation with schedule_task, bindToCurrentThread true and the structured schedule object. Compare existing schedules before creating; record cadence, binding and next run.',
+      `Ship time is ${c.schedules.shipTime} in ${c.schedules.timezone}. Verify the scheduler supports that timezone, or configure and verify its equivalent; never assume local time.`,
+      'Implementation uses delegate_task isolation worktree from the intended committed parent base; retain task receipts. A new review round is a new delegated task.'
+    ],
+    threads: roles.map(([role, modelRole]) => ({ role, modelSelection: c.models[modelRole], workspaceStrategy: { type: 'root' }, promptFile: `prompts/${role}.md`, message: prompts[role] })),
+    schedules
+  };
+  if (!write) { console.log(JSON.stringify(plan, null, 2)); return; }
+  const dir = path.resolve('.relay');
+  fs.mkdirSync(dir, { mode: 0o700 }); // Exclusive creation protects decisions and ownership on reruns.
+  fs.mkdirSync(path.join(dir, 'prompts'));
+  for (const [id, prompt] of Object.entries(prompts)) fs.writeFileSync(path.join(dir, `prompts/${id}.md`), prompt);
+  fs.cpSync(path.join(kit, 'skills/relay-engine/roles'), path.join(dir, 'roles'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'setup.json'), JSON.stringify(plan, null, 2) + '\n');
+  fs.writeFileSync(path.join(dir, 'schedules.json'), JSON.stringify(schedules, null, 2) + '\n');
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(c, null, 2) + '\n');
+  fs.writeFileSync(path.join(dir, 'decisions.md'), '# Decisions\n\nThe active CTO is the sole writer. Owner instructions take precedence. Current recorded decisions override crossed messages; stop and escalate unresolved conflicts.\n\n| Revision | Time | Decision | Supersedes | Affected lanes | Acknowledged |\n|---|---|---|---|---|---|\n');
+  fs.writeFileSync(path.join(dir, 'ownership.md'), '# Ownership\n\nOne row per task, maintained by its lead. Coordinate shared-file edits before starting. Row order is integration order; do not infer shipped from merged.\n\n| Branch | Lane | Task reference | Owned files / areas | Status | Proof / commit |\n|---|---|---|---|---|---|\n');
+  fs.writeFileSync(path.join(dir, 'ops-ledger.json'), '[]\n');
+  fs.writeFileSync(path.join(dir, 'takeover.json'), JSON.stringify({ active: false, reason: null, dispatches: [], savedRoutes: [] }, null, 2) + '\n');
+  fs.writeFileSync(path.join(dir, 'dashboard.html'), renderDashboard(dir));
+  const exclude = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8' }).trim();
+  fs.mkdirSync(path.dirname(exclude), { recursive: true });
+  // Ignore private runtime state at any worktree-relative location.
+  fs.appendFileSync(exclude, '\n.relay/\nrelay.config.yaml\n');
+  console.log('Created .relay: setup.json, prompts, roles, schedules, decisions, ownership, ledgers and dashboard.\nPrivate state excluded locally. No T3 resources created; no project commands executed.');
+}
+try { main(); } catch (e) { console.error(`relay: ${e.message}`); process.exitCode = 1; }

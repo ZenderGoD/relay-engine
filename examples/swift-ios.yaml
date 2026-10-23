@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "project": "sample-ios-app",
+  "baseRef": "main",
+  "lanes": {
+    "client": {
+      "scope": "Swift app, views and navigation"
+    },
+    "services": {
+      "scope": "Networking, persistence and shared contracts"
+    },
+    "delivery": {
+      "scope": "Integration, device acceptance and releases",
+      "ops": true
+    }
+  },
+  "commands": {
+    "build": "xcodebuild -scheme SampleApp -destination \"generic/platform=iOS Simulator\" -derivedDataPath \"$RELAY_TEST_DATA/DerivedData\" build",
+    "test": "swift test --scratch-path \"$RELAY_TEST_DATA/swift-build\"",
+    "typecheck": "xcodebuild -scheme SampleApp -destination \"generic/platform=iOS Simulator\" -derivedDataPath \"$RELAY_TEST_DATA/DerivedData\" analyze"
+  },
+  "workerCap": 4,
+  "buildSlots": 2,
+  "models": {
+    "cto": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "backup": {
+      "provider": "claude",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high"
+      }
+    },
+    "lead": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "worker": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "reviewer": {
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "options": {
+        "reasoningEffort": "low"
+      }
+    },
+    "tester": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "high"
+      }
+    },
+    "ops": {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "high"
+      }
+    }
+  },
+  "liveTest": {
+    "enabled": false,
+    "blackouts": [],
+    "ownerActiveHook": "bin/owner-active",
+    "beforeStepHook": "./scripts/relay-live-check",
+    "restoreHook": "./scripts/relay-live-restore"
+  },
+  "errors": {
+    "source": "none",
+    "pollCommand": ""
+  },
+  "release": {
+    "ownerApprovalRequired": true,
+    "steps": [
+      "Verify reviewed commit and device acceptance",
+      "Prepare an archive and rollback plan",
+      "Obtain owner approval for the exact artifact and destination",
+      "Run the project signing and distribution procedure",
+      "Verify installation and record receipts"
+    ]
+  },
+  "notifications": {
+    "webhookEnv": ""
+  },
+  "schedules": {
+    "watchdogMinutes": 10,
+    "triageMinutes": 15,
+    "failoverMinutes": 5,
+    "shipTime": "09:00",
+    "timezone": "Etc/UTC"
+  }
+}

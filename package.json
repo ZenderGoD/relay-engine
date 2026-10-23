@@ -1,0 +1,11 @@
+{
+  "name": "relay-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A lean multi-agent development kit for T3 Code",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test" },
+  "bin": { "relay": "bin/relay" }
+}

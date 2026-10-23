@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stub: replace with a project hook. 0=active, 1=idle, 2=unknown/error.
+# Include voice, foreground app, calls and recent owner-authored activity, not HID alone.
+set -eu
+printf '%s\n' 'unknown: configure owner activity detection before live testing'
+exit 2

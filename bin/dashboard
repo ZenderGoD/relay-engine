@@ -1,22 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { renderDashboard } from '../lib/dashboard.mjs';
 
-const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
-export function renderDashboard(dir) {
-  const read = name => fs.readFileSync(path.join(dir, name), 'utf8');
-  const cards = read('ownership.md').split('\n').filter(l => l.startsWith('| ') && !l.startsWith('| Branch')).map(line => {
-    const [branch, lane, task, owns, status, proof] = line.split('|').slice(1, -1).map(s => s.trim());
-    return `<article><h2>${esc(branch)}</h2><p>${esc(lane)} · ${esc(status)}</p><p>${esc(owns)}</p><small>${esc(task)} · ${esc(proof)}</small></article>`;
-  });
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Relay Engine</title><style>body{font:16px/1.5 system-ui;max-width:68rem;margin:auto;padding:2rem;background:#f5f5f3;color:#202321}h1{font-size:1.6rem}h2{font-size:1rem}section{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:1rem}article,pre{padding:1rem;border:1px solid #ccc;border-radius:.7rem;background:white}pre{white-space:pre-wrap;overflow-wrap:anywhere}small{overflow-wrap:anywhere}a{color:inherit}</style><h1>Relay Engine</h1><p>Local snapshot · ${esc(new Date().toISOString())}. Regenerate after ledger changes. No live provider or release status is inferred.</p><section>${cards.join('') || '<p>No active workers.</p>'}</section><h2>Decisions</h2><pre>${esc(read('decisions.md'))}</pre><h2>Schedules to configure</h2><pre>${esc(read('schedules.json'))}</pre></html>\n`;
-}
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    if (process.argv.length > 3) throw new Error('Usage: dashboard [state-directory]');
-    const dir = path.resolve(process.argv[2] || '.relay');
-    fs.writeFileSync(path.join(dir, 'dashboard.html'), renderDashboard(dir));
-    console.log('Updated dashboard.html');
-  } catch (e) { console.error(e.message); process.exitCode = 1; }
-}
+try {
+  if (process.argv.length > 3) throw new Error('Usage: dashboard [state-directory]');
+  const dir = path.resolve(process.argv[2] || '.relay');
+  fs.writeFileSync(path.join(dir, 'dashboard.html'), renderDashboard(dir));
+  console.log('Updated dashboard.html');
+} catch (e) { console.error(e.message); process.exitCode = 1; }

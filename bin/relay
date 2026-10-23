@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from '../lib/config.mjs';
-import { renderDashboard } from './dashboard';
+import { renderDashboard } from '../lib/dashboard.mjs';
 
 const kit = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function main() {
@@ -14,15 +14,15 @@ function main() {
     return;
   }
   if (args.shift() !== 'init') throw new Error('Only init is supported. Use --help.');
-  let config = 'relay.config.yaml', write = false;
+  let config, write = false;
   while (args.length) {
     const a = args.shift();
     if (a === '--write') write = true;
     else if (a === '--config' && args[0] && !args[0].startsWith('--')) config = args.shift();
     else throw new Error(`Unknown or incomplete argument: ${a}`);
   }
-  execFileSync('git', ['rev-parse', '--show-toplevel'], { stdio: 'ignore' });
-  const c = readConfig(config);
+  const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+  const c = readConfig(config ? path.resolve(config) : path.join(root, 'relay.config.yaml'));
   execFileSync('git', ['rev-parse', '--verify', `${c.baseRef}^{commit}`], { stdio: 'ignore' });
   const opsLane = Object.entries(c.lanes).find(([, l]) => l.ops)[0];
   const roles = [ ['cto', 'cto'], ['backup', 'backup'], ...Object.keys(c.lanes).map(id => [`lead-${id}`, 'lead']), ['ops', 'ops'] ];
@@ -54,23 +54,32 @@ function main() {
     schedules
   };
   if (!write) { console.log(JSON.stringify(plan, null, 2)); return; }
-  const dir = path.resolve('.relay');
-  fs.mkdirSync(dir, { mode: 0o700 }); // Exclusive creation protects decisions and ownership on reruns.
-  fs.mkdirSync(path.join(dir, 'prompts'));
-  for (const [id, prompt] of Object.entries(prompts)) fs.writeFileSync(path.join(dir, `prompts/${id}.md`), prompt);
-  fs.cpSync(path.join(kit, 'skills/relay-engine/roles'), path.join(dir, 'roles'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'setup.json'), JSON.stringify(plan, null, 2) + '\n');
-  fs.writeFileSync(path.join(dir, 'schedules.json'), JSON.stringify(schedules, null, 2) + '\n');
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(c, null, 2) + '\n');
-  fs.writeFileSync(path.join(dir, 'decisions.md'), '# Decisions\n\nThe active CTO is the sole writer. Owner instructions take precedence. Current recorded decisions override crossed messages; stop and escalate unresolved conflicts.\n\n| Revision | Time | Decision | Supersedes | Affected lanes | Acknowledged |\n|---|---|---|---|---|---|\n');
-  fs.writeFileSync(path.join(dir, 'ownership.md'), '# Ownership\n\nOne row per task, maintained by its lead. Coordinate shared-file edits before starting. Row order is integration order; do not infer shipped from merged.\n\n| Branch | Lane | Task reference | Owned files / areas | Status | Proof / commit |\n|---|---|---|---|---|---|\n');
-  fs.writeFileSync(path.join(dir, 'ops-ledger.json'), '[]\n');
-  fs.writeFileSync(path.join(dir, 'takeover.json'), JSON.stringify({ active: false, reason: null, dispatches: [], savedRoutes: [] }, null, 2) + '\n');
-  fs.writeFileSync(path.join(dir, 'dashboard.html'), renderDashboard(dir));
+  const target = path.join(root, '.relay');
+  const existsMessage = 'delete .relay and retry; existing state is never overwritten';
+  if (fs.lstatSync(target, { throwIfNoEntry: false })) throw new Error(existsMessage);
   const exclude = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8' }).trim();
   fs.mkdirSync(path.dirname(exclude), { recursive: true });
-  // Ignore private runtime state at any worktree-relative location.
-  fs.appendFileSync(exclude, '\n.relay/\nrelay.config.yaml\n');
+  fs.appendFileSync(exclude, '\n.relay/\n.relay-init-*/\nrelay.config.yaml\n');
+  const dir = fs.mkdtempSync(path.join(root, '.relay-init-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'prompts'));
+    for (const [id, prompt] of Object.entries(prompts)) fs.writeFileSync(path.join(dir, `prompts/${id}.md`), prompt);
+    fs.cpSync(path.join(kit, 'skills/relay-engine/roles'), path.join(dir, 'roles'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'setup.json'), JSON.stringify(plan, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'schedules.json'), JSON.stringify(schedules, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(c, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'decisions.md'), '# Decisions\n\nThe active CTO is the sole writer. Owner instructions take precedence. Current recorded decisions override crossed messages; stop and escalate unresolved conflicts.\n\n| Revision | Time | Decision | Supersedes | Affected lanes | Acknowledged |\n|---|---|---|---|---|---|\n');
+    fs.writeFileSync(path.join(dir, 'ownership.md'), '# Ownership\n\nOne row per task, maintained by its lead. Coordinate shared-file edits before starting. Escape cell pipes as \\| or &#124;. Row order is integration order; do not infer shipped from merged.\n\n| Branch | Lane | Task reference | Owned files / areas | Status | Proof / commit |\n|---|---|---|---|---|---|\n');
+    fs.writeFileSync(path.join(dir, 'ops-ledger.json'), '[]\n');
+    fs.writeFileSync(path.join(dir, 'takeover.json'), JSON.stringify({ active: false, reason: null, dispatches: [], savedRoutes: [] }, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'dashboard.html'), renderDashboard(dir));
+    fs.renameSync(dir, target);
+  } catch (e) {
+    if (fs.lstatSync(target, { throwIfNoEntry: false })) throw new Error(existsMessage);
+    throw e;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   console.log('Created .relay: setup.json, prompts, roles, schedules, decisions, ownership, ledgers and dashboard.\nPrivate state excluded locally. No T3 resources created; no project commands executed.');
 }
 try { main(); } catch (e) { console.error(`relay: ${e.message}`); process.exitCode = 1; }

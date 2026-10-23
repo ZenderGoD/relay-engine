@@ -8,9 +8,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 // shortcut: local POSIX hosts only; use a distributed lock for multi-host builds.
 async function main() {
   const args = process.argv.slice(2);
+  let timeoutValue = process.env.RELAY_SLOT_TIMEOUT ?? '0';
+  const separator = args.indexOf('--');
+  const timeoutIndex = args.slice(0, separator < 0 ? args.length : separator).indexOf('--timeout');
+  if (timeoutIndex >= 0) {
+    if (!args[timeoutIndex + 1] || args[timeoutIndex + 1].startsWith('--')) throw new Error('--timeout requires seconds.');
+    timeoutValue = args.splice(timeoutIndex, 2)[1];
+  }
+  const timeout = Number(timeoutValue);
+  if (!timeoutValue.trim() || !Number.isFinite(timeout) || timeout < 0) throw new Error('Slot timeout must be nonnegative seconds; 0 waits indefinitely.');
   const status = args.length === 1 && args[0] === 'status';
-  if (!status && (args.length < 3 || args[1] !== '--' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(args[0]))) throw new Error('Usage: build-slot status | build-slot <slug> -- <command> [args...]');
-  if (!status && process.env.RELAY_SLOT_HELD) throw new Error('Nested build slots are forbidden. Run the inner command directly.');
+  const release = args.length === 2 && args[0] === 'release';
+  if (!status && !release && (args.length < 3 || args[1] !== '--' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(args[0]))) throw new Error('Usage: build-slot status | build-slot release <n> | build-slot [--timeout seconds] <slug> -- <command> [args...]');
+  if (!status && !release && process.env.RELAY_SLOT_HELD) throw new Error('Nested build slots are forbidden. Run the inner command directly.');
   const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { encoding: 'utf8' }).trim();
   const dir = path.resolve(process.env.RELAY_SLOT_DIR || path.join(common, 'relay-build-slots'));
   fs.mkdirSync(dir, { recursive: true });
@@ -33,10 +43,34 @@ async function main() {
     }
     return;
   }
+  if (release) {
+    const n = Number(args[1]);
+    if (!Number.isInteger(n) || n < 1 || n > limit) throw new Error(`Slot number must be from 1 to ${limit}.`);
+    const slot = path.join(dir, `slot-${n}`);
+    const guard = path.join(dir, `release-${n}`);
+    // Serialize Ops releases so another release cannot delete a newly acquired slot.
+    fs.mkdirSync(guard);
+    try {
+      if (!fs.existsSync(slot)) { console.log(`slot-${n}: already free`); return; }
+      let receipt;
+      try { receipt = JSON.parse(fs.readFileSync(path.join(slot, 'owner.json'), 'utf8')); }
+      catch { throw new Error(`Unverifiable receipt; Ops must inspect ${slot}.`); }
+      if (![receipt.pid, receipt.group].every(p => Number.isInteger(p) && p > 1)) throw new Error(`Incomplete receipt; Ops must inspect ${slot}.`);
+      for (const pid of [receipt.pid, -receipt.group]) {
+        try { process.kill(pid, 0); }
+        catch (e) { if (e.code === 'ESRCH') continue; throw e; }
+        throw new Error(`Refusing release: wrapper or process group is still alive (${slot}).`);
+      }
+      fs.rmSync(slot, { recursive: true });
+      console.log(`Released slot-${n}: ${slot}`);
+    } finally { fs.rmdirSync(guard); }
+    return;
+  }
   const data = process.env.RELAY_TEST_DATA;
   if (!data || !path.isAbsolute(data) || path.resolve(data) === path.parse(data).root) throw new Error('Set RELAY_TEST_DATA to a dedicated absolute task data directory.');
   fs.mkdirSync(data, { recursive: true });
-  let slot, child, stopping = 0, escalation;
+  let slot, child, stopping = 0, escalation, announced = false;
+  const waitingSince = performance.now();
   const groupAlive = () => {
     if (!child?.pid) return false;
     try { process.kill(-child.pid, 0); return true; }
@@ -61,7 +95,15 @@ async function main() {
         try { fs.mkdirSync(candidate); slot = candidate; break; }
         catch (e) { if (e.code !== 'EEXIST') throw e; }
       }
-      if (!slot) await delay(100);
+      if (!slot) {
+        if (!announced) { console.error('waiting for slot; run `build-slot status`'); announced = true; }
+        if (timeout > 0 && performance.now() - waitingSince >= timeout * 1000) {
+          console.error(`build-slot: timed out after ${timeout} seconds waiting for a slot`);
+          process.exitCode = 124;
+          return;
+        }
+        await delay(100);
+      }
     }
     if (stopping) { process.exitCode = stopping; return; }
     const receipt = { slug: args[0], pid: process.pid, group: null, since: new Date().toISOString() };

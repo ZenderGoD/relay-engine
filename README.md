@@ -1,8 +1,10 @@
 # Relay Engine
 
-Relay Engine is a reusable multi-agent development pipeline built on T3 Code. An owner sets direction; a CTO coordinates three leads; leads own workers, reviews and acceptance. A backup handles confirmed CTO provider outages. Ops manages delivery while a separate OPs intake deduplicates errors.
+Relay Engine is a reusable multi-agent development pipeline built on T3 Code. An owner sets direction, a CTO coordinates three leads, and leads own workers, reviews and acceptance.
 
-This kit contains role instructions, a validated project config, a local setup generator, shared build slots and a static dashboard. It creates no external resources and has no runtime dependencies beyond Node, Bash and Git.
+[T3 Code](https://github.com/pingdotgg/t3code) is a desktop workspace for running coding agents and coordinating their conversations, tools and Git worktrees.
+
+The kit provides role instructions, validated config, a setup generator, shared build slots and an offline dashboard. It creates no external resources and needs no dependency installation.
 
 ```text
 Owner
@@ -16,79 +18,160 @@ Owner
        OPs intake ─── issue ledger and error triage
 ```
 
-Lane names are configurable. The third lead need not be named delivery: exactly one lane is marked `ops`. OPs intake is a distinct standing role. `workerCap` limits all active delegated tasks per lead, including reviewers and testers; workers never spawn workers.
+Lane names are configurable; exactly one lead has `ops: true`. OPs intake is a separate standing role. `workerCap` counts all active delegated tasks per lead, including reviews and testers. Workers never spawn workers.
 
 ## Work flow
 
-1. The CTO records the current decision and assigns a lane. The lead reserves files and gives one worker a self-contained brief at a committed base.
-2. The worker reproduces, fixes and tests in its own T3-bound worktree and isolated data. Heavy jobs share build slots across worktrees.
-3. The lead launches a second-model review, resolves findings, then starts independent acceptance at the reviewed commit. Each review round is a new delegated task with the prior findings included.
-4. The lead reports reviewed READY or a concrete BLOCKED result. Ops prepares integration and release evidence; the CTO obtains exact owner approval before release. The kit grants no automatic merge, push or deployment permission.
-5. OPs deduplicates incoming issues, routes them to the Ops lead and records confirmed lifecycle outcomes. Failed acceptance returns to the same lane; repeated bounces escalate.
+1. The CTO records a decision and assigns a lane. The lead reserves files and briefs one worker at a committed base.
+2. The worker reproduces, fixes and tests in an isolated T3-bound worktree. Heavy jobs share build slots.
+3. The lead launches second-model review, resolves findings, then starts independent acceptance at the reviewed commit. Each review round gets a new delegated task with prior findings included.
+4. The lead reports READY or BLOCKED. Ops prepares integration and evidence; the CTO obtains exact owner release approval.
+5. OPs deduplicates errors and routes fixes through the Ops lead. Acceptance failures return to the same lane; repeated failures escalate.
 
-Source inspection, automated tests, simulator proof, live provider checks, physical device checks and release delivery are separate evidence lanes. Missing checks stay UNTESTED. A tool acknowledgment is not a delivery receipt.
+Source inspection, automated tests, simulator, live provider, physical device and release delivery are separate evidence lanes. Missing checks stay UNTESTED. A launch acknowledgment is not delivery proof.
 
 ## Requirements
 
-- T3 Code with its MCP orchestration tools: capability discovery, thread launch/read/send, delegated tasks and status, schedule creation/listing, and private secret entry when needed.
-- A target Git repository with a committed base branch.
-- Node 22 or newer, Bash, Git and a local macOS or Linux host for build slots. No dependency installation is needed for this kit.
-- Codex and/or Claude configured in T3. Workers and reviewers use different models; a backup on another provider is preferable. The sample model identifiers are examples: resolve them against the live catalog and verify options.
-- Project-specific build/test tools, error adapters and live-test hooks when enabled. T3 schedules require the app running and connected; this kit is not an always-on service.
+- T3 Code with MCP capability discovery, thread launch/read/send, delegated tasks/status, schedule creation/listing and private secret entry when needed.
+- A target Git repo with a committed base branch.
+- Node 22 or newer and Git. Build slots support local macOS/Linux hosts. The optional owner-active stub uses Bash.
+- Codex and/or Claude in T3. Worker and reviewer models must differ; a backup on another provider is preferable. Verify sample model identifiers and options against the live catalog.
+- The project's build/test tools and any enabled adapters or hooks. Schedules need T3 running and connected.
 
 ## Quick start
 
-Keep the kit checkout next to the target project. From the target repo:
+Keep the kit beside the target project. From the target repo root:
 
 ```sh
 cp ../relay-engine/relay.config.example.yaml relay.config.yaml
-# Edit project, baseRef, lane scopes, commands, model selections and policies.
-../relay-engine/bin/relay init --config relay.config.yaml
-../relay-engine/bin/relay init --config relay.config.yaml --write
-../relay-engine/bin/dashboard .relay
+# Edit the config at the target Git root.
+../relay-engine/bin/relay init
+../relay-engine/bin/relay init --write
 ```
 
-`relay init` prints a complete setup plan without executing commands. `--write` exclusively creates `.relay/` with prompts for CTO, backup, three leads and OPs, a setup plan, four schedule definitions, decisions, ownership, issue/takeover ledgers and `dashboard.html`. Rerunning `--write` fails rather than replacing state. The target repo's local Git exclusions hide `.relay/` and `relay.config.yaml`. Run from the project root and keep config/runtime state private. Review custom config paths before staging them.
+Adjust the kit path when running from a subdirectory. Default config is read from the Git root. An explicit `--config file` resolves relative to your current directory.
 
-Ask the project CTO to apply `.relay/setup.json` in T3 after review. The plan explains capability resolution, workspace binding, role routing and schedule receipts. The generator does not call T3. Standing roles use top-level conversations; implementation uses app-owned delegated worktrees. Retain launch receipts and inspect after uncertain results before retrying. Register schedules from the owning role conversation, compare existing timers, and verify cadence, binding and next run. Ship time includes an explicit project timezone: the current T3 wall-clock scheduler uses local time, so configure and verify the equivalent before enabling it.
+`relay init` prints the full plan without running commands. Its output includes entries like this (excerpt):
 
-Open `.relay/dashboard.html` locally. It shows ownership, decisions and planned schedules as an escaped, offline snapshot. Regenerate it after ledger changes; it makes no claims about live thread health or completed shipping.
+```json
+{
+  "project": "sample-project",
+  "threads": [{
+    "role": "cto",
+    "workspaceStrategy": { "type": "root" },
+    "promptFile": "prompts/cto.md"
+  }],
+  "schedules": [{
+    "role": "lead-delivery",
+    "title": "Relay watchdog",
+    "schedule": { "type": "interval", "everyMs": 600000 }
+  }]
+}
+```
 
-## Configuration
+`--write` creates `.relay/` at the Git root, regardless of your current directory. Output:
 
-The `.yaml` files use **JSON syntax, valid YAML 1.2**. This deliberate subset avoids a parser dependency; comments, anchors and ordinary indentation-style YAML are unsupported. Config commands are trusted project instructions displayed to agents, never executed by `init`. Unknown extra fields are not interpreted. Use `examples/swift-ios.yaml` or `examples/nextjs.yaml` as starting points; replace sample schemes, scripts and hooks with real project commands.
+```text
+Created .relay: setup.json, prompts, roles, schedules, decisions, ownership, ledgers and dashboard.
+Private state excluded locally. No T3 resources created; no project commands executed.
+```
 
-Config covers three lead lanes, build/test/typecheck, worker and build caps, per-role models/options, live-test hooks and blackouts, error source (`none`, `sentry`, `convex`, `custom`), release steps, four schedules and an optional notification environment reference. Enabled error sources require a project-provided, read-only, redacting `pollCommand`. Notifications require a project sender and explicit authorization; the kit sends none. Store environment variable names, never credential values, in config.
+Generation uses a private temporary sibling directory, then renames it atomically. Existing state is preserved with the message `delete .relay and retry`; back up decisions and receipts before doing that. Git locally excludes `.relay/`, temporary output and `relay.config.yaml`. Review custom config paths before staging.
 
-`liveTest.enabled` defaults false. Enabling it alone grants no clearance. The owner-active stub exits 2 (unknown); replace it before live tests. Exit 0 means active, 1 means idle, and errors/unknown block. The project must implement `beforeStepHook` and `restoreHook`, blackout enforcement, isolated accounts/data/ports and abort-on-owner-return behavior. Hooks are policy contracts for agents and the project harness; this kit does not implement an autonomous live-test runner. Never point them at the owner's app or conversations. Owner-app rebuilds need separate approval, an exclusive lock, an artifact backup, test-stamp rejection and verified restoration on failure.
+Have the CTO review and apply `.relay/setup.json` in T3. It contains six standing-role prompts and four schedule plans. Resolve capabilities and workspace bindings, retain launch receipts and check existing timers before creating any. Verify each schedule's cadence, destination and next run.
+
+Ship time uses a project timezone. T3's wall-clock scheduler uses local time: configure and verify the equivalent before enabling it. The generator never calls T3 or grants merge, push or deployment authority.
+
+From the target root, run `../relay-engine/bin/dashboard .relay` and open `.relay/dashboard.html`. Regenerate after ledger changes. It shows local ownership, decisions and planned schedules, without inferring live health or completed shipping. Escape ownership table cell pipes as `\|` or `&#124;`.
+
+## Minimal config
+
+The `.yaml` files use **JSON syntax, valid YAML 1.2**, to avoid a parser dependency. Indentation-style YAML, comments and anchors are unsupported. This is a complete small config; replace model selections and commands for your project:
+
+```json
+{
+  "version": 1,
+  "project": "sample-project",
+  "baseRef": "main",
+  "lanes": {
+    "product": { "scope": "Client" },
+    "platform": { "scope": "Services" },
+    "delivery": { "scope": "Delivery", "ops": true }
+  },
+  "commands": { "build": "npm run build", "test": "npm test", "typecheck": "npm run typecheck" },
+  "workerCap": 4,
+  "buildSlots": 2,
+  "models": {
+    "cto": { "provider": "codex", "model": "gpt-6.1-sol", "options": {} },
+    "backup": { "provider": "codex", "model": "gpt-6.1-sol", "options": {} },
+    "lead": { "provider": "codex", "model": "gpt-6.1-sol", "options": {} },
+    "worker": { "provider": "codex", "model": "gpt-6.1-sol", "options": {} },
+    "reviewer": { "provider": "codex", "model": "gpt-6-astra", "options": {} },
+    "tester": { "provider": "codex", "model": "gpt-6.1-sol", "options": {} },
+    "ops": { "provider": "codex", "model": "gpt-6.1-sol", "options": {} }
+  },
+  "liveTest": {
+    "enabled": false, "blackouts": [], "ownerActiveHook": "bin/owner-active",
+    "beforeStepHook": "./scripts/relay-live-check", "restoreHook": "./scripts/relay-live-restore"
+  },
+  "errors": { "source": "none", "pollCommand": "" },
+  "release": { "ownerApprovalRequired": true, "steps": ["Prepare proof, obtain owner approval, then follow the project release procedure"] },
+  "notifications": { "webhookEnv": "" },
+  "schedules": { "watchdogMinutes": 10, "triageMinutes": 15, "failoverMinutes": 5, "shipTime": "09:00", "timezone": "Etc/UTC" }
+}
+```
+
+`relay.config.example.yaml` includes fuller model options and release steps. `examples/swift-ios.yaml` and `examples/nextjs.yaml` supply project-specific starting points. Replace sample schemes, scripts and hooks.
+
+Error sources are `none`, `sentry`, `logs` or `custom`. Enabled sources need a project-provided read-only, redacting `pollCommand`. Notifications need a project sender and explicit authorization. Store environment variable names, never credential values.
+
+Config commands are trusted project instructions displayed to agents; `init` never runs them. Unknown extra fields are not interpreted.
+
+## Live-test policy
+
+Live testing defaults off. Enabling it does not grant clearance. Replace the owner-active stub first: exit 0 means active, 1 means idle, and 2/errors mean unknown and block testing. Include voice activity, not just keyboard/mouse input.
+
+The project implements `beforeStepHook`, `restoreHook`, blackouts and abort-on-owner-return behavior. Isolate accounts, data, preferences and ports. Never test against the owner's app or conversations. These hooks are contracts for agents and the project harness; the kit has no autonomous live-test runner.
+
+Owner-app rebuilds need separate approval, an exclusive lock, artifact backup, test-stamp rejection and verified restoration on failure.
 
 ## Shared build slots
 
 ```sh
 export RELAY_TEST_DATA="$(mktemp -d)"
-# Match buildSlots from your config. All worktrees must use the same shared limit.
-export RELAY_BUILD_SLOTS=2
-../relay-engine/bin/build-slot fix-example -- npm test
+export RELAY_BUILD_SLOTS=2  # Match buildSlots across all worktrees.
+../relay-engine/bin/build-slot --timeout 300 fix-example -- npm test
 ../relay-engine/bin/build-slot status
-# After retaining required proof, remove only this task's temporary data.
 ```
 
-Map `RELAY_TEST_DATA` into the application's real data setting and harness. Requiring the variable does not itself isolate project storage. Swift examples isolate build output but still require the project's fixture/data adapter. Build-slot requires a dedicated absolute directory for every command; use separate task directories and cache/output roots.
+Map `RELAY_TEST_DATA` to the application's actual data setting. The variable alone does not isolate storage. Use dedicated task data, cache and output directories. Retain proof, then clean only your own resources.
 
-Slots live under Git's common directory, shared by its worktrees. `RELAY_SLOT_DIR` can choose another single shared directory on the same host. The persisted limit rejects inconsistent callers; Ops drains all jobs before changing it. Nested wrappers fail to avoid deadlock. Commands run in a separate process group; termination is forwarded, with escalation, before the slot is released. Exit codes propagate. Do not daemonize or detach descendants from the command's group.
+`--timeout` sets slot-wait seconds and overrides `RELAY_SLOT_TIMEOUT`. The default, 0, waits indefinitely. A waiting job prints one hint; a timeout exits 124 without running the command. It does not limit an acquired command's runtime.
 
-Locks use atomic directories without extra utilities. A hard-killed wrapper or host crash leaves the lock held deliberately. `status` shows wrapper and process-group receipts; Ops verifies both have ended before removing that specific slot directory. Never auto-reclaim by age or wrapper PID alone. This favors safe capacity over automatic crash recovery; use an external lock service for multiple hosts.
+The exact default lock path is `$(git rev-parse --git-common-dir)/relay-build-slots/slot-<n>/owner.json`. In a normal checkout that is `.git/relay-build-slots/slot-<n>/owner.json`. Worktrees share the common directory. `RELAY_SLOT_DIR` overrides the pool directory on the same host.
+
+The shared `limit` file rejects inconsistent caps; Ops drains all jobs before changing it. Nested wrappers fail. Commands run in an owned process group; signals propagate and descendants are stopped before release. Do not daemonize or detach descendants.
+
+Hard kills leave locks held. Ops can release a slot after inspecting `status`:
+
+```sh
+../relay-engine/bin/build-slot release 1
+```
+
+Release refuses a live wrapper, a live process group or an incomplete receipt. It checks only that numbered slot and serializes concurrent release attempts. Unknown ownership needs manual Ops inspection at the exact path above; never reclaim by age alone. An interrupted release can leave `release-<n>/` beside the slot: verify no release command remains before removing that guard. Use an external lock service for multiple hosts.
 
 ## Lessons from running the pipeline
 
-- **Crossed messages:** a decision can arrive after a newer reversal. The active CTO alone writes revisioned `decisions.md`; leads acknowledge it and stop on conflicts. Owner instructions remain authoritative.
-- **Test-data isolation:** a separate binary can still share preferences, ports or synced conversations. Isolate all of them, restore touched settings and attest the actual process.
-- **Build slots:** worker count does not limit expensive builds. One shared pool prevents concurrent worktrees from exhausting memory or disk.
-- **Urgent decisions:** a queued message can sit behind a long lead turn. Interrupt the lead with the complete current brief when an urgent reversal must stop work, and verify acknowledgment.
-- **Lead-owned reviews:** the lead owns independent second-model rounds and findings. Workers fix; they do not certify themselves or forward review coordination through the CTO.
-- **Stalled-worker recovery:** inspect receipts, recent activity and commits first. Distinguish held work from provider failure, preserve ownership, and never duplicate an active worker.
-- **Disk hygiene:** dedicated simulators, build directories and test data accumulate fast. Track task-owned resources; delete dedicated devices as well as shutting them down. Preserve shared resources and retained proof.
+- **Crossed messages:** CTO-written, revisioned `decisions.md` overrides stale messages. Leads acknowledge revisions; owner instructions remain authoritative.
+- **Test-data isolation:** a separate binary can still share preferences, ports or synced conversations. Isolate them and attest the actual process.
+- **Build slots:** a shared pool prevents concurrent worktrees from exhausting memory and disk.
+- **Urgent decisions:** interrupt a lead with the complete current brief when a queued reversal cannot wait; verify acknowledgment.
+- **Lead-owned reviews:** leads coordinate second-model rounds. Workers fix findings rather than certify themselves.
+- **Stalled workers:** inspect receipts, activity and commits before restarting. Preserve holds and ownership; never duplicate active work.
+- **Disk hygiene:** track and delete task-owned simulators, caches and data. Preserve shared resources and proof.
 
 ## Development
 
-Run `npm test` (or `node --test`) in this kit. Tests cover config rejection, safe initialization, dashboard escaping, shared slot capacity, command failures and process termination. No test contacts a provider, creates a T3 resource or launches an owner application. MIT licensed; contributions start in CONTRIBUTING.md.
+Run `npm test` or `node --test`. Checks cover initialization, config, dashboard escaping, slot capacity and recovery. They do not contact providers or launch an owner app.
+
+Distribution is by Git checkout; `private: true` prevents package publication. MIT licensed. See CONTRIBUTING.md.

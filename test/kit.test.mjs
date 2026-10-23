@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readConfig } from '../lib/config.mjs';
-import { renderDashboard } from '../bin/dashboard';
+import { renderDashboard } from '../lib/dashboard.mjs';
 
 const kit = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bin = name => path.join(kit, 'bin', name);
@@ -166,4 +166,135 @@ test('a hard-killed wrapper leaves its slot held for explicit recovery', async t
   const status = run(dir, 'build-slot', ['status']);
   assert.match(status.stdout, /hard/);
   assert.equal(held(dir).length, 1);
+});
+
+test('init from a nested directory resolves default config and writes at the Git root', t => {
+  const dir = repo(t), nested = path.join(dir, 'src', 'nested');
+  fs.mkdirSync(nested, { recursive: true });
+  const result = run(nested, 'relay', ['init', '--write']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fs.existsSync(path.join(dir, '.relay', 'dashboard.html')));
+  assert.equal(fs.existsSync(path.join(nested, '.relay')), false);
+  assert.deepEqual(fs.readdirSync(dir).filter(n => n.startsWith('.relay-init-')), []);
+  const rerun = run(nested, 'relay', ['init', '--write']);
+  assert.match(rerun.stderr, /delete \.relay and retry/);
+});
+
+test('init preserves an existing empty state directory', t => {
+  const dir = repo(t), state = path.join(dir, '.relay');
+  fs.mkdirSync(state);
+  const result = run(dir, 'relay', ['init', '--write']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /delete \.relay and retry/);
+  assert.deepEqual(fs.readdirSync(state), []);
+  fs.rmdirSync(state);
+  fs.symlinkSync(path.join(dir, 'missing-state'), state);
+  assert.match(run(dir, 'relay', ['init', '--write']).stderr, /delete \.relay and retry/);
+});
+
+test('generation failure leaves no partial state or temporary output', t => {
+  const dir = repo(t), hook = path.join(dir, 'fail-write.mjs');
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+const write = fs.writeFileSync;
+fs.writeFileSync = function(file, ...args) {
+  if (String(file).endsWith('/dashboard.html')) throw new Error('simulated disk failure');
+  return write.call(this, file, ...args);
+};`);
+  const result = spawnSync(process.execPath, ['--import', hook, bin('relay'), 'init', '--write'], { cwd: dir, encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /simulated disk failure/);
+  assert.equal(fs.existsSync(path.join(dir, '.relay')), false);
+  assert.deepEqual(fs.readdirSync(dir).filter(n => n.startsWith('.relay-init-')), []);
+});
+
+test('concurrent initializers publish one complete directory and preserve the winner', async t => {
+  const dir = repo(t);
+  const launch = () => new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [bin('relay'), 'init', '--write'], { cwd: dir, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = ''; p.stderr.on('data', chunk => { stderr += chunk; });
+    p.once('error', reject); p.once('exit', code => resolve({ code, stderr }));
+  });
+  const results = await Promise.all([launch(), launch()]);
+  assert.deepEqual(results.map(r => r.code).sort(), [0, 1]);
+  assert.match(results.find(r => r.code === 1).stderr, /delete \.relay and retry/);
+  assert.equal(fs.readdirSync(path.join(dir, '.relay', 'prompts')).length, 6);
+  assert.ok(fs.existsSync(path.join(dir, '.relay', 'dashboard.html')));
+  assert.deepEqual(fs.readdirSync(dir).filter(n => n.startsWith('.relay-init-')), []);
+});
+
+test('dashboard preserves escaped table pipes without shifting cells', t => {
+  const dir = repo(t); run(dir, 'relay', ['init', '--write']);
+  const state = path.join(dir, '.relay');
+  fs.appendFileSync(path.join(state, 'ownership.md'), '| feature/demo | web | local | left \\| right and a&#124;b | blocked | proof \\| checked |\n');
+  const html = renderDashboard(state);
+  assert.ok(html.includes('<p>left &#124; right and a&#124;b</p>'));
+  assert.ok(html.includes('web · blocked'));
+  assert.ok(html.includes('proof &#124; checked'));
+});
+
+test('slot wait timeout prints one hint and never starts the command', t => {
+  const dir = repo(t); run(dir, 'build-slot', ['status']);
+  for (const n of [1, 2]) {
+    const slot = path.join(slotDir(dir), `slot-${n}`); fs.mkdirSync(slot);
+    fs.writeFileSync(path.join(slot, 'owner.json'), JSON.stringify({ pid: process.pid, group: process.pid }));
+  }
+  const command = ['waiting', '--', process.execPath, '-e', "require('node:fs').writeFileSync('should-not-run','ran')"];
+  const env = { RELAY_TEST_DATA: path.join(dir, 'data'), RELAY_SLOT_TIMEOUT: '0.15' };
+  for (const args of [command, ['--timeout', '0.15', ...command]]) {
+    const result = run(dir, 'build-slot', args, env);
+    assert.equal(result.status, 124, result.stderr);
+    assert.equal(result.stderr.split('waiting for slot; run `build-slot status`').length - 1, 1);
+    assert.equal(fs.existsSync(path.join(dir, 'should-not-run')), false);
+    assert.equal(held(dir).length, 2);
+  }
+  const invalid = run(dir, 'build-slot', ['--timeout', '-1', ...command], env);
+  assert.notEqual(invalid.status, 0); assert.match(invalid.stderr, /nonnegative/);
+});
+
+test('timeout flag overrides the environment and command arguments remain untouched', t => {
+  const dir = repo(t);
+  const result = run(dir, 'build-slot', ['--timeout', '1', 'args', '--', process.execPath, '-e', 'process.stdout.write(process.argv[1])', '--', '--timeout'], { RELAY_TEST_DATA: path.join(dir, 'data'), RELAY_SLOT_TIMEOUT: 'invalid' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '--timeout');
+  assert.equal(result.stderr, '');
+});
+
+test('Ops release refuses live or uncertain ownership and removes only a dead slot', async t => {
+  const dir = repo(t); run(dir, 'build-slot', ['status']);
+  const dead = Number(execFileSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).trim());
+  const slot = path.join(slotDir(dir), 'slot-1'); fs.mkdirSync(slot);
+  const owner = path.join(slot, 'owner.json');
+  const live = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' });
+  await new Promise((resolve, reject) => { live.once('spawn', resolve); live.once('error', reject); });
+  t.after(async () => {
+    const done = new Promise(resolve => live.once('exit', resolve));
+    process.kill(-live.pid, 'SIGTERM');
+    await done;
+  });
+  for (const receipt of [{ pid: process.pid, group: dead }, { pid: dead, group: live.pid }, { pid: dead, group: null }]) {
+    fs.writeFileSync(owner, JSON.stringify(receipt));
+    assert.notEqual(run(dir, 'build-slot', ['release', '1']).status, 0);
+    assert.ok(fs.existsSync(slot));
+  }
+  fs.writeFileSync(owner, 'invalid receipt');
+  assert.match(run(dir, 'build-slot', ['release', '1']).stderr, /Unverifiable/);
+  const untouched = path.join(slotDir(dir), 'slot-2'); fs.mkdirSync(untouched);
+  fs.writeFileSync(owner, JSON.stringify({ pid: dead, group: dead }));
+  const result = run(dir, 'build-slot', ['release', '1']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Released slot-1/);
+  assert.equal(fs.existsSync(slot), false);
+  assert.equal(fs.existsSync(untouched), true);
+  assert.equal(fs.existsSync(path.join(slotDir(dir), 'release-1')), false);
+  assert.notEqual(run(dir, 'build-slot', ['release', '../2']).status, 0);
+});
+
+test('minimal README config validates and logs is an accepted adapter', t => {
+  const dir = repo(t);
+  const readme = fs.readFileSync(path.join(kit, 'README.md'), 'utf8');
+  const section = readme.split('## Minimal config')[1];
+  const c = JSON.parse(section.match(/```json\n([\s\S]+?)\n```/)[1]);
+  c.errors = { source: 'logs', pollCommand: './scripts/read-logs' };
+  save(dir, c);
+  assert.equal(readConfig(path.join(dir, 'relay.config.yaml')).errors.source, 'logs');
 });

@@ -5,7 +5,32 @@
   "type": "module",
   "description": "A lean multi-agent development kit for T3 Code",
   "license": "MIT",
-  "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test" },
-  "bin": { "relay": "bin/relay" }
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "bin": {
+    "relay": "bin/relay",
+    "build-slot": "bin/build-slot",
+    "dashboard": "bin/dashboard"
+  },
+  "keywords": [
+    "multi-agent",
+    "t3-code",
+    "development",
+    "orchestration",
+    "agent-workflows"
+  ],
+  "files": [
+    "bin/",
+    "lib/",
+    "skills/",
+    "examples/",
+    "relay.config.example.yaml",
+    "README.md",
+    "CONTRIBUTING.md",
+    "LICENSE"
+  ]
 }
